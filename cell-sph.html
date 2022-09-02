@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script type="module" src="cell-boids.js"></script>
+    <title>Cell-Div Fluid</title>
+    <script type="x-shader/x-vertex" id="update-vs">
+    #version 300 es
+
+    in vec4 pos;
+
+    void main() {
+        gl_Position = pos;
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="slowdown-update-fs">
+    #version 300 es
+    precision highp float;
+
+    uniform sampler2D posVelTex;
+    uniform vec2 canvasDim;
+    uniform float dt;
+
+    out vec4 color;
+
+    vec2 euclideanModulo(vec2 n, vec2 m) {
+        return mod(mod(n, m) + m, m);
+    }
+
+    void main() {
+        ivec2 texelCoord = ivec2(gl_FragCoord.xy);
+        vec4 posVel = texelFetch(posVelTex, texelCoord, 0);
+        vec2 oldPos = posVel.rg;
+        vec2 oldVel = posVel.ba;
+        vec2 vel = oldVel * (1.0 - 0.1 * dt);
+        vec2 pos = euclideanModulo(oldPos + vel*dt, canvasDim);
+
+        color = vec4(pos.x, pos.y, vel.x, vel.y);
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="boid-update-fs">
+    #version 300 es
+    precision highp float;
+
+    uniform sampler2D posVelTex;
+    uniform sampler2D presDensTex;
+    uniform vec2 canvasDim;
+    uniform int numParticles;
+    uniform float dt;
+    uniform vec2 cellDim;
+    uniform highp isampler2D cellTex;
+
+    out vec4 color;
+
+    ivec2 texDim;
+    vec2 cellSize;
+
+    #define INDEX_TEXTURE_FETCH(tex, i) texelFetch(tex, ivec2(i % texDim.x, i / texDim.x), 0)
+
+    struct Particle {
+        int i;
+        vec2 pos;
+        vec2 vel;
+        float pressure;
+        float density;
+    };
+
+    Particle getParticle(int i) {
+        vec4 posVel = INDEX_TEXTURE_FETCH(posVelTex, i);
+        vec2 presDens = INDEX_TEXTURE_FETCH(presDensTex, i).rg;
+        return Particle(i, posVel.rg, posVel.ba, presDens.r, presDens.g);
+    }
+
+    // from position
+    ivec2 getCellLoc(vec2 pos) {
+        return ivec2(pos / cellSize);
+    }
+
+    // from cell index
+    ivec2 getCellLoc(int i) {
+        return ivec2(i % int(cellDim.x), i / int(cellDim.x));
+    }
+
+    int getCellIdx(ivec2 cellLoc) {
+        return cellLoc.x + int(cellDim.x) * cellLoc.y;
+    }
+
+    int getCellStart(int i) {
+        return INDEX_TEXTURE_FETCH(cellTex, i).b;
+    }
+
+    ivec2 getParticleCell(int i) {
+        return INDEX_TEXTURE_FETCH(cellTex, i).rg;
+    }
+
+    bool cellInRange(Particle p, int cell_i, float range) {
+        ivec2 cell = getCellLoc(cell_i);
+
+        // Jeffrey Thompson
+        vec2 bl = vec2(cell.x, cell.y) * cellSize;
+        vec2 tr = vec2(cell.x+1, cell.y+1) * cellSize;
+
+        vec2 test = p.pos;
+        if (p.pos.x < bl.x) test.x = bl.x;
+        else if (p.pos.x > tr.x) test.x = tr.x;
+        if (p.pos.y < bl.y) test.y = bl.y;
+        else if (p.pos.y > tr.y) test.y = tr.y;
+
+        vec2 dist = p.pos - test;
+
+        return dot(dist, dist) <= range * range;
+    }
+
+    void main() {
+        texDim = textureSize(posVelTex, 0);
+        cellSize = canvasDim / cellDim;
+        int numCells = int(cellDim.x) * int(cellDim.y);
+
+        int pIndex = int(gl_FragCoord.x) + texDim.x * int(gl_FragCoord.y);
+        Particle p = getParticle(pIndex);
+
+        float margin = 50.0;
+        float turnFactor = 0.1;
+
+        if (p.pos.x < margin) {
+            p.vel.x += turnFactor;
+        } else if (p.pos.x > canvasDim.x - margin) {
+            p.vel.x -= turnFactor;
+        }
+        if (p.pos.y < margin) {
+            p.vel.y += turnFactor;
+        } else if (p.pos.y > canvasDim.y - margin) {
+            p.vel.y -= turnFactor;
+        }
+
+        p.pos += p.vel*dt*20.0;
+        p.pos = max(min(p.pos, canvasDim), vec2(0));
+
+        color = vec4(p.pos, p.vel);
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="cell-update-fs">
+    #version 300 es
+    precision highp float;
+
+    uniform sampler2D posVelTex;
+    uniform vec2 canvasDim;
+    uniform vec2 cellDim;
+
+    out ivec4 color;
+
+    ivec2 texDim;
+
+    struct Particle {
+        int i;
+        vec2 pos;
+        vec2 vel;
+    };
+
+    Particle getParticle(int i) {
+        ivec2 texPos = ivec2(i % texDim.x, i / texDim.x);
+        vec4 posVel = texelFetch(posVelTex, texPos, 0);
+        return Particle(i, posVel.rg, posVel.ba);
+    }
+
+    void main() {
+        texDim = textureSize(posVelTex, 0);
+        int pIndex = int(gl_FragCoord.x) + texDim.x * int(gl_FragCoord.y);
+        Particle p = getParticle(pIndex);
+        int cellX = int(cellDim.x * p.pos.x / canvasDim.x);
+        cellX = max(min(cellX, int(cellDim.x)-1), 0);
+        int cellY = int(cellDim.y * p.pos.y / canvasDim.y);
+        cellY = max(min(cellY, int(cellDim.y)-1), 0);
+        int cell = cellX + cellY * int(cellDim.x);
+
+        color = ivec4(p.i, cell, -1, 0);
+    }
+    </script>
+    <script type="x-shader/x-vertex" id="render-vs">
+    #version 300 es
+
+    uniform sampler2D posVelTex;
+    uniform mat4 matrix;
+
+    out vec4 iColor;
+
+    vec4 getValue(sampler2D tex, ivec2 dim, int i) {
+        int x = i % dim.x;
+        int y = i / dim.x;
+        return texelFetch(tex, ivec2(x, y), 0);
+    }
+
+    void main() {
+        ivec2 texDim = textureSize(posVelTex, 0);
+        vec4 posVel = getValue(posVelTex, texDim, gl_VertexID);
+        vec2 pos = posVel.rg;
+        vec2 vel = posVel.ba;
+
+        gl_Position = matrix * vec4(pos.xy, 0, 1);
+        gl_PointSize = 2.0;
+
+        iColor = vec4(vel.x / 30.0 + 0.5, vel.y / 30.0 + 0.5, 1.0, 1.0);
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="render-fs">
+    #version 300 es
+    precision highp float;
+
+    in vec4 iColor;
+
+    out vec4 color;
+
+    void main() {
+        color = iColor;
+    }
+    </script>
+</head>
+<body style="background: black">
+<canvas id="canvas" tabindex="0" style="
+    padding: 0;
+    margin: auto;
+    display: block;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;">
+    Canvas not supported.
+</canvas>
+<div style="position: absolute;">
+    <p id="fps" style="font-family: Arial,sans-serif; color: white"></p>
+    <label for="numParticlesSlider"></label>
+    <input type="range" min="0" max="5" value="0" id="numParticlesSlider"><br>
+    <label for="numCellsSlider"></label>
+    <input type="range" min="0" max="5" value="0" id="numCellsSlider">
+</div>
+</body>
+</html>

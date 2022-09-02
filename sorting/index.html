@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>GPU Sorting</title>
+    <script type="module" src="main.js"></script>
+    <script type="x-shader/x-vertex" id="vs">
+    #version 300 es
+    in vec4 pos;
+    void main() {
+        gl_Position = pos;
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="fs">
+    #version 300 es
+    precision highp float;
+    uniform sampler2D srcTex;
+    out vec4 outColor;
+    void main() {
+        ivec2 texelCoord = ivec2(gl_FragCoord.xy);
+        vec4 value = texelFetch(srcTex, texelCoord, 0);
+        outColor = value * 2.0;
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="new-idx-fs">
+    #version 300 es
+    precision highp float;
+    uniform sampler2D srcTex;
+    out vec4 outColor;
+
+    ivec2 texDim;
+
+    vec4 getValue(int i) {
+        ivec2 texPos = ivec2(i % texDim.x, i / texDim.x);
+        return texelFetch(srcTex, texPos, 0);
+    }
+
+    void main() {
+        texDim = textureSize(srcTex, 0);
+        int i = int(gl_FragCoord.x) + texDim.x * int(gl_FragCoord.y);
+        vec4 val = getValue(i);
+        int max_i = texDim.x * texDim.y - 1;
+        int n = max_i;
+        int v = int(val.r);
+        for (int j = 0; j <= max_i; j++) {
+            if (i != j) {
+                int vv = int(getValue(j).r);
+                if (vv > v || (vv == v && j > i)) n--;
+            }
+        }
+        outColor = vec4(n, 0, 0, 0);
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="new-val-fs">
+    #version 300 es
+    precision highp float;
+    uniform sampler2D srcTex;
+    uniform sampler2D idxTex;
+    out vec4 outColor;
+
+    ivec2 texDim;
+
+    vec4 getValue(sampler2D tex, int i) {
+        ivec2 texPos = ivec2(i % texDim.x, i / texDim.x);
+        return texelFetch(tex, texPos, 0);
+    }
+
+    void main() {
+        texDim = textureSize(srcTex, 0);
+        int i = int(gl_FragCoord.x) + texDim.x * int(gl_FragCoord.y);
+        for (int j = 0; j < texDim.x*texDim.y; j++) {
+            int idx = int(getValue(idxTex, j).r);
+            if (i == idx) {
+                outColor = getValue(srcTex, j);
+                return;
+            }
+        }
+        outColor = vec4(-1);
+    }
+    </script>
+    <script type="x-shader/x-vertex" id="render-vs">
+    #version 300 es
+    uniform int numPoints;
+    uniform int maxValue;
+    uniform sampler2D values;
+    void main() {
+        ivec2 texDim = textureSize(values, 0);
+        ivec2 texPos = ivec2(gl_VertexID % texDim.x, gl_VertexID / texDim.x);
+        float x = -1.0 + 2.0*(float(gl_VertexID+1) / float (numPoints+2));
+        float y = -1.0 + 2.0*(texelFetch(values, texPos, 0).r / float(maxValue));
+        gl_Position = vec4(x, y, 0, 1);
+        gl_PointSize = 3.0;
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="render-fs">
+    #version 300 es
+    precision highp float;
+    out vec4 outColor;
+    void main() {
+        outColor = vec4(0, 0, 0, 1);
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="odd-even-fs">
+    #version 300 es
+    precision highp float;
+    uniform sampler2D inTex;
+    uniform int even;
+
+    out vec4 outColor;
+
+    ivec2 texDim;
+
+    vec4 getValue(int i) {
+        ivec2 texPos = ivec2(i % texDim.x, i / texDim.x);
+        return texelFetch(inTex, texPos, 0);
+    }
+
+    void main() {
+        texDim = textureSize(inTex, 0);
+        int i = int(gl_FragCoord.x) + texDim.x * int(gl_FragCoord.y);
+        if (even == 1) {
+            if (i % 2 == 0) {
+                int j = i + 1;
+                outColor = vec4(min(getValue(i), getValue(j)));
+            } else {
+                int j = i - 1;
+                outColor = vec4(max(getValue(i), getValue(j)));
+            }
+        } else {
+            if (i == 0 || i == (texDim.x*texDim.y - 1)) {
+                outColor = vec4(getValue(i));
+                return;
+            }
+
+            if (i % 2 == 1) {
+                int j = i + 1;
+                outColor = vec4(min(getValue(i), getValue(j)));
+            } else {
+                int j = i - 1;
+                outColor = vec4(max(getValue(i), getValue(j)));
+            }
+        }
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="merge-fs">
+    #version 300 es
+    precision highp float;
+    uniform sampler2D inTex;
+    uniform int level;
+
+    out vec4 outColor;
+
+    ivec2 texDim;
+
+    vec4 getValue(int i) {
+        ivec2 texPos = ivec2(i % texDim.x, i / texDim.x);
+        return texelFetch(inTex, texPos, 0);
+    }
+
+    void main() {
+        texDim = textureSize(inTex, 0);
+        int i = int(gl_FragCoord.x) + texDim.x * int(gl_FragCoord.y);
+        int subLen = int(pow(2.0, float(level + 1)));
+        int start = i - (i % subLen);
+        int m = subLen / 2;
+        int l = 0;
+        int r = m;
+        float v = 0.0;
+        for (int j = 0; j <= i - start; j++) {
+            if (l == m) {
+                v = getValue(start + r).x;
+                r++;
+            } else if (r == subLen) {
+                v = getValue(start + l).x;
+                l++;
+            } else {
+                float lv = getValue(start + l).x;
+                float rv = getValue(start + r).x;
+                if (rv < lv) {
+                    v = rv;
+                    r++;
+                } else {
+                    v = lv;
+                    l++;
+                }
+            }
+        }
+        outColor = vec4(v);
+    }
+    </script>
+    <script type="x-shader/x-fragment" id="bitonic-fs">
+    #version 300 es
+    precision highp float;
+
+    out vec4 outColor;
+
+    uniform sampler2D inTex;
+    uniform uint blockStep;
+    uniform uint subBlockStep;
+    uniform uint size;
+
+    uint coordToIndex(uvec2 coord) {
+        return coord.x + coord.y * size;
+    }
+
+    uvec2 indexToCoord(uint i) {
+        return uvec2(i % size, i / size);
+    }
+
+    void main() {
+        uint i = coordToIndex(uvec2(gl_FragCoord.xy));
+        uint d = 1u << (blockStep - subBlockStep);
+
+        bool up = ((i >> blockStep) & 2u) == 0u;
+
+        uint target;
+        if ((i & d) == 0u) {
+            target = i | d;
+        } else {
+            target = i & ~d;
+            up = !up;
+        }
+
+        float a = texelFetch(inTex, ivec2(indexToCoord(i)), 0).x;
+        float b = texelFetch(inTex, ivec2(indexToCoord(target)), 0).x;
+
+        if ((a > b) == up) {
+            outColor = vec4(b);
+        } else {
+            outColor = vec4(a);
+        }
+    }
+    </script>
+</head>
+<body>
+Execution of serial and parallel sorting algorithms. Open the console.
+<canvas id="canvas" style="
+    padding: 0;
+    margin: auto;
+    display: block;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;">
+    Canvas not supported.
+</canvas>
+</body>
+</html>
